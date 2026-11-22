@@ -1,0 +1,254 @@
+import asyncio
+import random
+import os
+from aiogram import Bot, Dispatcher, F
+from aiogram.filters import Command
+from aiogram.types import (
+    Message, CallbackQuery,
+    InlineKeyboardMarkup, InlineKeyboardButton,
+    LabeledPrice, PreCheckoutQuery
+)
+
+BOT_TOKEN = os.getenv("BOT_TOKEN", "ВСТАВЬ_ТОКЕН_СЮДА")
+
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
+
+# ==================== ДАННЫЕ ====================
+
+JOBS = [
+    ("Безработный", 0),
+    ("Курьер", 800),
+    ("Продавец", 1500),
+    ("Менеджер", 3000),
+    ("Программист", 6000),
+    ("Топ-менеджер", 12000),
+    ("Бизнесмен", 25000),
+]
+
+EVENTS = [
+    ("Ты нашёл 500 ₽ на улице!", {"money": 500}),
+    ("Простуда. -10 к здоровью", {"health": -10}),
+    ("Друг пригласил на вечеринку. +15 к счастью, -5 к здоровью", {"happiness": 15, "health": -5}),
+    ("Ты выиграл в лотерею 2000 ₽!", {"money": 2000}),
+    ("Сгорел ужин. -200 ₽", {"money": -200}),
+    ("Хорошая погода! +5 к счастью", {"happiness": 5}),
+    ("Стресс на работе. -10 к счастью", {"happiness": -10}),
+    ("Ты помог бабушке перейти дорогу. +10 к счастью", {"happiness": 10}),
+    ("Тебя ограбили! -1000 ₽", {"money": -1000}),
+    ("Свидание мечты! +20 к счастью", {"happiness": 20}),
+]
+
+DONATE_OPTIONS = {
+    "buy_100": (100, 1000),
+    "buy_500": (500, 6000),
+    "buy_1000": (1000, 15000),
+}
+
+players = {}
+
+# ==================== ЛОГИКА ====================
+
+def new_player():
+    return {"age": 18, "money": 500, "health": 100, "happiness": 100,
+            "energy": 100, "job_level": 0, "turn": 0}
+
+def get_player(uid):
+    if uid not in players:
+        players[uid] = new_player()
+    return players[uid]
+
+def clamp(v, lo=0, hi=100):
+    return max(lo, min(hi, v))
+
+def game_status(p):
+    return (
+        f"👤 *{p['age']} лет*\n"
+        f"💼 Работа: {JOBS[p['job_level']][0]}\n\n"
+        f"💰 Деньги: {p['money']} ₽\n"
+        f"❤️ Здоровье: {p['health']}/100\n"
+        f"😊 Счастье: {p['happiness']}/100\n"
+        f"⚡ Энергия: {p['energy']}/100"
+    )
+
+def game_keyboard():
+    kb = [
+        [InlineKeyboardButton(text="💼 Работать", callback_data="work"),
+         InlineKeyboardButton(text="📚 Учиться", callback_data="study")],
+        [InlineKeyboardButton(text="🏋️ Спортзал", callback_data="gym"),
+         InlineKeyboardButton(text="🍔 Поесть", callback_data="eat")],
+        [InlineKeyboardButton(text="🎮 Отдохнуть", callback_data="rest"),
+         InlineKeyboardButton(text="💤 Спать", callback_data="sleep")],
+        [InlineKeyboardButton(text="⭐ Купить валюту", callback_data="shop")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+def apply_event(p):
+    if random.random() < 0.3:
+        text, changes = random.choice(EVENTS)
+        for k, v in changes.items():
+            p[k] = p[k] + v
+        p["health"] = clamp(p["health"])
+        p["happiness"] = clamp(p["happiness"])
+        p["energy"] = clamp(p["energy"])
+        if p["money"] < 0:
+            p["money"] = 0
+        return f"\n\n🎲 *Событие:* {text}"
+    return ""
+
+def check_game_over(p):
+    if p["health"] <= 0:
+        return "💀 Ты умер от болезней. Игра окончена."
+    if p["happiness"] <= 0:
+        return "💀 Ты впал в депрессию. Игра окончена."
+    if p["age"] >= 100:
+        return "🎉 Ты прожил до 100 лет! Победа!"
+    return None
+
+async def do_action(uid, action):
+    p = get_player(uid)
+
+    if action == "work":
+        if p["job_level"] == 0:
+            return "Сначала найди работу — для этого учись!"
+        if p["energy"] < 20:
+            return "⚡ Слишком устал. Отдохни или поспи."
+        salary = JOBS[p["job_level"]][1]
+        p["money"] += salary
+        p["energy"] -= 20
+        p["happiness"] -= 5
+        msg = f"💼 Ты поработал и заработал {salary} ₽"
+
+    elif action == "study":
+        if p["energy"] < 15:
+            return "⚡ Слишком устал."
+        p["energy"] -= 15
+        p["happiness"] -= 3
+        if random.random() < 0.4 and p["job_level"] < len(JOBS) - 1:
+            p["job_level"] += 1
+            msg = f"📚 Ты выучился! Новая работа: {JOBS[p['job_level']][0]}"
+        else:
+            msg = "📚 Ты учился, но пока без повышения."
+
+    elif action == "gym":
+        if p["energy"] < 20: return "⚡ Слишком устал."
+        if p["money"] < 300: return "💸 Нужно 300 ₽ на спортзал."
+        p["money"] -= 300; p["energy"] -= 20
+        p["health"] = clamp(p["health"] + 15); p["happiness"] += 5
+        msg = "🏋️ Ты потренировался. +15 к здоровью."
+
+    elif action == "eat":
+        if p["money"] < 200: return "💸 Нужно 200 ₽ на еду."
+        p["money"] -= 200
+        p["health"] = clamp(p["health"] + 10)
+        p["energy"] = clamp(p["energy"] + 15); p["happiness"] += 5
+        msg = "🍔 Ты вкусно поел."
+
+    elif action == "rest":
+        p["energy"] = clamp(p["energy"] + 10)
+        p["happiness"] += 15
+        p["health"] = clamp(p["health"] - 2)
+        msg = "🎮 Ты отдохнул. +15 к счастью."
+
+    elif action == "sleep":
+        p["energy"] = 100
+        p["health"] = clamp(p["health"] + 5)
+        msg = "💤 Ты выспался. Энергия восстановлена."
+
+    p["health"] = clamp(p["health"])
+    p["happiness"] = clamp(p["happiness"])
+    p["energy"] = clamp(p["energy"])
+    p["turn"] += 1
+    if p["turn"] % 5 == 0:
+        p["age"] += 1
+
+    event_text = apply_event(p)
+    over = check_game_over(p)
+    if over:
+        players[uid] = new_player()
+        return f"{msg}{event_text}\n\n{over}\n\nНапиши /start чтобы начать заново."
+    return f"{msg}{event_text}\n\n{game_status(p)}"
+
+# ==================== ХЕНДЛЕРЫ ====================
+
+@dp.message(Command("start"))
+async def cmd_start(message: Message):
+    players[message.from_user.id] = new_player()
+    p = players[message.from_user.id]
+    await message.answer(
+        f"🎮 *Симулятор жизни*\n\nДобро пожаловать! Старт в 18 лет, 500 ₽ в кармане.\n"
+        f"Проживи жизнь так, чтобы не было мучительно больно.\n\n{game_status(p)}",
+        reply_markup=game_keyboard(), parse_mode="Markdown"
+    )
+
+@dp.callback_query(F.data.in_(["work", "study", "gym", "eat", "rest", "sleep"]))
+async def on_action(cb: CallbackQuery):
+    result = await do_action(cb.from_user.id, cb.data)
+    if not result.startswith(("💼", "📚", "🏋️", "🍔", "🎮", "💤")):
+        await cb.answer(result, show_alert=True)
+        return
+    p = get_player(cb.from_user.id)
+    await cb.message.edit_text(result, reply_markup=game_keyboard(), parse_mode="Markdown")
+    await cb.answer()
+
+@dp.callback_query(F.data == "shop")
+async def on_shop(cb: CallbackQuery):
+    kb = [
+        [InlineKeyboardButton(text="100 ⭐ → 1 000 ₽", callback_data="buy_100")],
+        [InlineKeyboardButton(text="500 ⭐ → 6 000 ₽ (+20% бонус)", callback_data="buy_500")],
+        [InlineKeyboardButton(text="1000 ⭐ → 15 000 ₽ (+50% бонус)", callback_data="buy_1000")],
+        [InlineKeyboardButton(text="← Назад", callback_data="back_game")],
+    ]
+    await cb.message.edit_text(
+        "⭐ *Магазин валюты*\n\nПоддержи проект звёздами Telegram и получи игровые деньги!",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="Markdown"
+    )
+    await cb.answer()
+
+@dp.callback_query(F.data == "back_game")
+async def on_back(cb: CallbackQuery):
+    p = get_player(cb.from_user.id)
+    await cb.message.edit_text(game_status(p), reply_markup=game_keyboard(), parse_mode="Markdown")
+    await cb.answer()
+
+@dp.callback_query(F.data.in_(DONATE_OPTIONS.keys()))
+async def on_buy(cb: CallbackQuery):
+    stars, money = DONATE_OPTIONS[cb.data]
+    await bot.send_invoice(
+        chat_id=cb.from_user.id,
+        title=f"{money} игровых ₽",
+        description=f"Покупка {money} игровой валюты за {stars} звёзд",
+        payload=cb.data,
+        provider_token="",
+        currency="XTR",
+        prices=[LabeledPrice(label=f"{money} ₽ в игре", amount=stars)],
+    )
+    await cb.answer()
+
+@dp.pre_checkout_query()
+async def on_pre_checkout(pre: PreCheckoutQuery):
+    await pre.answer(ok=True)
+
+@dp.message(F.successful_payment)
+async def on_payment(message: Message):
+    payload = message.successful_payment.invoice_payload
+    if payload in DONATE_OPTIONS:
+        _, money = DONATE_OPTIONS[payload]
+        p = get_player(message.from_user.id)
+        p["money"] += money
+        await message.answer(
+            f"✅ Оплата получена! +{money} ₽ на счёт.\n\n{game_status(p)}",
+            reply_markup=game_keyboard(), parse_mode="Markdown"
+        )
+
+@dp.message(Command("paysupport"))
+async def cmd_paysupport(message: Message):
+    await message.answer("Если что-то с оплатой — напиши /start чтобы перезапустить игру.")
+
+# ==================== ЗАПУСК ====================
+
+async def main():
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
